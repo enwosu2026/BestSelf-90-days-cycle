@@ -7,6 +7,25 @@ import { Logo } from "../ui/Primitives.jsx";
 const GOLD = "#D1AF33";
 const CREAM = "#FDFBF7";
 const DARK_INDIGO = "#0B0E1C";
+const BLOCKED_OAUTH_HOST_SNIPPETS = ["ai.google.dev", "aistudio.google.com", "run.app", "cloud-run"];
+
+function isValidHttpUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isBlockedOAuthHost(url) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return BLOCKED_OAUTH_HOST_SNIPPETS.some((part) => hostname.includes(part));
+  } catch {
+    return true;
+  }
+}
 
 /**
  * Social Login component.
@@ -70,6 +89,22 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
 
   const supabase = getSupabase();
   const configured = isSupabaseConfigured() && supabase;
+
+  const getOAuthRedirectUrl = useCallback(() => {
+    const configuredRedirect = import.meta.env.VITE_AUTH_REDIRECT_URL?.trim();
+    const fallbackRedirect = `${window.location.origin}/`;
+    const candidate = configuredRedirect || fallbackRedirect;
+
+    if (isValidHttpUrl(candidate) && !isBlockedOAuthHost(candidate)) {
+      return candidate;
+    }
+
+    if (isValidHttpUrl(fallbackRedirect) && !isBlockedOAuthHost(fallbackRedirect)) {
+      return fallbackRedirect;
+    }
+
+    return null;
+  }, []);
 
   const emitSuccess = useCallback(
     (session, isSignUp = false) => {
@@ -160,10 +195,15 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
     setErr("");
     setLoading("google");
     try {
+      const redirectTo = getOAuthRedirectUrl();
+      if (!redirectTo) {
+        throw new Error("No safe OAuth redirect URL found. Set VITE_AUTH_REDIRECT_URL to your Netlify app URL.");
+      }
+
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: `${window.location.origin}/`,
+          redirectTo,
           queryParams: { access_type: "offline", prompt: "consent" },
           skipBrowserRedirect: true,
         },
@@ -171,6 +211,9 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
       if (error) throw error;
 
       if (data?.url) {
+        if (isBlockedOAuthHost(data.url)) {
+          throw new Error("Blocked invalid OAuth destination. Please check your Supabase redirect URLs.");
+        }
         const authWindow = window.open(data.url, "google_auth", "width=600,height=700");
         
         if (!authWindow) {
