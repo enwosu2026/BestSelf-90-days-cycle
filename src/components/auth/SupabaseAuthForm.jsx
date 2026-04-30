@@ -27,6 +27,20 @@ function isBlockedOAuthHost(url) {
   }
 }
 
+function hasRecoveryParams() {
+  const search = new URLSearchParams(window.location.search);
+  const hashRaw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  const hash = new URLSearchParams(hashRaw);
+
+  return (
+    search.get("type") === "recovery" ||
+    hash.get("type") === "recovery" ||
+    !!search.get("recovery_token") ||
+    !!hash.get("recovery_token") ||
+    (!!hash.get("access_token") && hash.get("type") === "recovery")
+  );
+}
+
 /**
  * Social Login component.
  */
@@ -75,7 +89,7 @@ function SocialLogins({ mode = "signin", onGoogle, loading }) {
  * Email/password sign-up & sign-in plus Google OAuth.
  */
 export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
-  const [tab, setTab] = useState("login"); // signup | login
+  const [tab, setTab] = useState("login"); // signup | login | reset
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -85,6 +99,7 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
   const [loading, setLoading] = useState(null);
   const [err, setErr] = useState("");
   const [info, setInfo] = useState("");
+  const [isRecoveryMode, setIsRecoveryMode] = useState(hasRecoveryParams);
   const googleTimerRef = useRef(null);
 
   const supabase = getSupabase();
@@ -136,9 +151,30 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
         }
         return;
       }
-      if (session?.user) emitSuccess(session);
+      if (session?.user) {
+        if (isRecoveryMode) {
+          setTab("reset");
+          return;
+        }
+        emitSuccess(session);
+      }
     });
-  }, [configured, supabase, emitSuccess]);
+  }, [configured, supabase, emitSuccess, isRecoveryMode]);
+
+  useEffect(() => {
+    if (!configured || !supabase) return;
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setIsRecoveryMode(true);
+        setTab("reset");
+        setErr("");
+        setInfo("Set your new password below.");
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, [configured, supabase]);
 
   async function handleEmailSubmit() {
     setErr("");
@@ -237,6 +273,74 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
       }
     } catch (e) {
       setErr(e.message || "Google sign-in failed.");
+      setLoading(null);
+    }
+  }
+
+  async function handleForgotPassword() {
+    setErr("");
+    setInfo("");
+    const cleanEmail = email.trim();
+    if (!cleanEmail) {
+      setErr("Enter your email first, then tap Forget password.");
+      return;
+    }
+
+    setLoading("forgot");
+    try {
+      const redirectTo = getOAuthRedirectUrl();
+      if (!redirectTo) {
+        throw new Error("No safe reset redirect URL found. Set VITE_AUTH_REDIRECT_URL to your Netlify app URL.");
+      }
+      const resetRedirect = new URL(redirectTo);
+      resetRedirect.searchParams.set("type", "recovery");
+
+      const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo: resetRedirect.toString(),
+      });
+      if (error) throw error;
+      setInfo("Password reset email sent. Open the email link to set a new password.");
+    } catch (e) {
+      setErr(e.message || "Could not send reset email.");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function handlePasswordReset() {
+    setErr("");
+    setInfo("");
+    if (!password) {
+      setErr("Enter your new password.");
+      return;
+    }
+    if (password.length < 6) {
+      setErr("Password must be at least 6 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setErr("Passwords do not match.");
+      return;
+    }
+
+    setLoading("reset");
+    try {
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) throw error;
+
+      setInfo("Password updated. You can now log in with your new password.");
+      setPassword("");
+      setConfirm("");
+      setIsRecoveryMode(false);
+      setTab("login");
+
+      const next = new URL(window.location.href);
+      next.searchParams.delete("type");
+      next.searchParams.delete("code");
+      window.history.replaceState({}, "", `${next.pathname}${next.search}`);
+    } catch (e) {
+      setErr(e.message || "Could not update password.");
+    } finally {
       setLoading(null);
     }
   }
@@ -366,7 +470,7 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
 
         <div style={{ marginBottom: 32 }}>
           <h2 style={{ fontSize: 24, fontWeight: 500, color: "black", letterSpacing: "-0.01em" }}>
-            {tab === "login" ? "Welcome back" : "Create account"}
+            {tab === "login" ? "Welcome back" : tab === "signup" ? "Create account" : "Reset password"}
           </h2>
         </div>
 
@@ -395,7 +499,7 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
         </div>
 
         <div style={inputGroupStyle}>
-          <label style={labelStyle}>Password</label>
+          <label style={labelStyle}>{tab === "reset" ? "New Password" : "Password"}</label>
           <div style={{ position: "relative" }}>
             <input 
               value={password} 
@@ -403,8 +507,8 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
               placeholder="••••••••" 
               type={showPassword ? "text" : "password"} 
               style={inputStyle} 
-              autoComplete={tab === "signup" ? "new-password" : "current-password"} 
-              onKeyDown={(e) => e.key === "Enter" && handleEmailSubmit()} 
+              autoComplete={tab === "signup" || tab === "reset" ? "new-password" : "current-password"} 
+              onKeyDown={(e) => e.key === "Enter" && (tab === "reset" ? handlePasswordReset() : handleEmailSubmit())} 
             />
             <button 
               type="button" 
@@ -416,9 +520,9 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
           </div>
         </div>
 
-        {tab === "signup" && (
+        {(tab === "signup" || tab === "reset") && (
           <div style={inputGroupStyle}>
-            <label style={labelStyle}>Confirm Password</label>
+            <label style={labelStyle}>{tab === "reset" ? "Confirm New Password" : "Confirm Password"}</label>
             <input 
               value={confirm} 
               onChange={(e) => setConfirm(e.target.value)} 
@@ -436,8 +540,13 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
               <input type="checkbox" checked={rememberMe} onChange={() => setRememberMe(!rememberMe)} style={{ accentColor: DARK_INDIGO, width: 16, height: 16 }} />
               Remember me
             </label>
-            <button type="button" style={{ background: "none", border: "none", color: GOLD, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-              Forget password?
+            <button
+              type="button"
+              onClick={handleForgotPassword}
+              disabled={!!loading}
+              style={{ background: "none", border: "none", color: GOLD, fontSize: 13, fontWeight: 700, cursor: loading ? "wait" : "pointer", opacity: loading ? 0.8 : 1 }}
+            >
+              {loading === "forgot" ? "Sending..." : "Forget password?"}
             </button>
           </div>
         )}
@@ -447,29 +556,48 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
 
         <button 
           type="button" 
-          onClick={handleEmailSubmit} 
+          onClick={tab === "reset" ? handlePasswordReset : handleEmailSubmit}
           disabled={!!loading}
           className="tap"
           style={primaryBtnStyle}
         >
-          {loading === "email" ? "Loading..." : (tab === "login" ? "Log In" : "Create Account")}
+          {loading === "email" || loading === "reset"
+            ? "Loading..."
+            : tab === "login"
+              ? "Log In"
+              : tab === "signup"
+                ? "Create Account"
+                : "Update Password"}
         </button>
 
-        <SocialLogins 
-          mode={tab === "login" ? "signin" : "signup"} 
-          onGoogle={handleGoogle}
-          loading={loading === "google"}
-        />
+        {tab !== "reset" && (
+          <SocialLogins 
+            mode={tab === "login" ? "signin" : "signup"} 
+            onGoogle={handleGoogle}
+            loading={loading === "google"}
+          />
+        )}
 
         <div style={{ marginTop: 40, textAlign: "center" }}>
           <p style={{ color: "black", fontSize: 14, fontWeight: 500 }}>
-            {tab === "login" ? "Don't have an account? " : "Already have an account? "}
+            {tab === "login"
+              ? "Don't have an account? "
+              : tab === "signup"
+                ? "Already have an account? "
+                : "Back to login? "}
             <button 
               type="button" 
               onClick={() => {
-                setTab(tab === "login" ? "signup" : "login");
+                if (tab === "reset") {
+                  setTab("login");
+                  setIsRecoveryMode(false);
+                } else {
+                  setTab(tab === "login" ? "signup" : "login");
+                }
                 setErr("");
                 setInfo("");
+                setPassword("");
+                setConfirm("");
               }}
               style={{ background: "none", border: "none", color: GOLD, fontWeight: 900, cursor: "pointer", padding: 0, fontSize: 14 }}
             >
