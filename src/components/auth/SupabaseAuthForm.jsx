@@ -107,15 +107,15 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
 
   const getOAuthRedirectUrl = useCallback(() => {
     const configuredRedirect = import.meta.env.VITE_AUTH_REDIRECT_URL?.trim();
-    const fallbackRedirect = `${window.location.origin}/`;
-    const candidate = configuredRedirect || fallbackRedirect;
+    const currentSiteRedirect = `${window.location.origin}/`;
 
-    if (isValidHttpUrl(candidate) && !isBlockedOAuthHost(candidate)) {
-      return candidate;
+    // In production, always prefer the domain currently serving the app.
+    if (isValidHttpUrl(currentSiteRedirect) && !isBlockedOAuthHost(currentSiteRedirect)) {
+      return currentSiteRedirect;
     }
 
-    if (isValidHttpUrl(fallbackRedirect) && !isBlockedOAuthHost(fallbackRedirect)) {
-      return fallbackRedirect;
+    if (configuredRedirect && isValidHttpUrl(configuredRedirect) && !isBlockedOAuthHost(configuredRedirect)) {
+      return configuredRedirect;
     }
 
     return null;
