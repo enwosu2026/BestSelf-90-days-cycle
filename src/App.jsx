@@ -68,7 +68,7 @@ function getMilestone(streak) {
 // ── AI suggestion helper ──
 async function fetchAISuggestions(dim, existingGoals, userName) {
   try {
-    const res = await fetch(getApiUrl("/.netlify/functions/ai-suggestions"), {
+    const res = await fetch(getApiUrl("/api/ai/suggestions"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dim, existingGoals, userName })
@@ -718,7 +718,7 @@ function Paywall({ user, supabaseUser, setData, onClose, authUserId }) {
 
       console.log("Initiating checkout session:", { priceId, userId: authUserId, email });
 
-      const response = await fetch(getApiUrl("/.netlify/functions/create-checkout"), {
+      const response = await fetch(getApiUrl("/api/create-checkout-session"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

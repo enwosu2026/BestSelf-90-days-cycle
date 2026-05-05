@@ -1,0 +1,15 @@
+# Render Blueprint — create/update this service from the Render Dashboard (Blueprints) or link the repo.
+# Set secrets (Stripe, Supabase, Gemini, etc.) in the Render dashboard: Environment → Environment Variables.
+
+services:
+  - type: web
+    name: bestself-90-day
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production

@@ -374,7 +374,7 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
   };
 
   if (!configured) {
-    const isNetlify = window.location.hostname.includes("netlify.app");
+    const isRender = window.location.hostname.includes("onrender.com");
     const isAIStudio = window.location.hostname.includes("europe-west2.run.app") || window.location.hostname.includes("cloud-run");
     const missing = [];
     const url = import.meta.env.VITE_SUPABASE_URL;
@@ -398,8 +398,8 @@ export function SupabaseAuthForm({ onAuthSuccess, onDevBypass }) {
                  Select <b>Environment Variables</b> and add the keys below. 
                  Then click <b>Restart Server</b>.
                </p>
-            ) : isNetlify ? (
-              <p>Your Netlify site needs environment variables in Site Settings {"->"} Environment variables. Re-deploy after adding them.</p>
+            ) : isRender ? (
+              <p>Your Render service needs environment variables in the dashboard: Environment {"->"} Environment Variables. Redeploy after adding them.</p>
             ) : (
               <p>To enable authentication and data sync, you need to provide your Supabase project credentials in your .env file.</p>
             )}

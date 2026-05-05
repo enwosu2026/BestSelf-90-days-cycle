@@ -4,12 +4,10 @@ import path from "path";
 import Stripe from "stripe";
 import dotenv from "dotenv";
 import cors from "cors";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
-const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
 // Supabase Admin client for server-side operations (bypasses RLS)
@@ -17,20 +15,90 @@ const supabaseAdmin = (process.env.VITE_SUPABASE_URL && process.env.SUPABASE_SER
   ? createClient(process.env.VITE_SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
 
+const PORT = Number(process.env.PORT) || 3000;
+
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  // Behind Render’s reverse proxy so req.protocol / host match the public URL (Stripe redirect URLs)
+  app.set("trust proxy", 1);
 
   app.use(cors());
+
+  // Stripe Webhook must use raw body — must be registered before express.json()
+  app.post("/api/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+    const sig = req.headers["stripe-signature"];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    let event;
+
+    try {
+      if (webhookSecret && sig && stripe) {
+        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+      } else {
+        event = req.body;
+      }
+    } catch (err: any) {
+      console.error(`Webhook Error: ${err.message}`);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
+        const userId = session.client_reference_id;
+        console.log(`Payment successful for user: ${userId}`);
+
+        if (supabaseAdmin && userId) {
+          try {
+            const { data: row, error: fetchError } = await supabaseAdmin
+              .from("user_app_data")
+              .select("payload")
+              .eq("id", userId)
+              .maybeSingle();
+
+            if (fetchError) throw fetchError;
+
+            let payload = row?.payload || {};
+            if (!payload.user) payload.user = {};
+            payload.user.subscribed = true;
+            payload.user.subscriptionDate = new Date().toISOString();
+
+            const { error: updateError } = await supabaseAdmin
+              .from("user_app_data")
+              .upsert({
+                id: userId,
+                payload,
+                updated_at: new Date().toISOString(),
+              });
+
+            if (updateError) throw updateError;
+            console.log(`Supabase updated: User ${userId} is now subscribed.`);
+          } catch (dbError) {
+            console.error("Error updating Supabase subscription:", dbError);
+          }
+        }
+        break;
+      }
+      case "customer.subscription.deleted": {
+        const subscription = event.data.object;
+        console.log(`Subscription deleted: ${subscription.id}`);
+        break;
+      }
+      default:
+        console.log(`Unhandled event type ${event.type}`);
+    }
+
+    res.json({ received: true });
+  });
+
   app.use(express.json());
 
-  // Support both legacy API paths and direct Netlify function paths in preview
   const handleCheckout = async (req: express.Request, res: express.Response) => {
     try {
       const { priceId: rawPriceId, userId, userEmail } = req.body;
       const priceId = rawPriceId ? String(rawPriceId).trim() : "";
-      
-      console.log(`[Stripe Preview] Session request: priceId=${priceId}, userId=${userId}`);
+
+      console.log(`[Checkout] Session request: priceId=${priceId}, userId=${userId}`);
 
       if (!process.env.STRIPE_SECRET_KEY || !stripe) {
         return res.status(500).json({ error: "Stripe secret key not configured." });
@@ -45,7 +113,7 @@ async function startServer() {
 
       let baseUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
       if (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
-      
+
       const sessionOptions: any = {
         payment_method_types: ["card"],
         line_items: [{ price: effectivePriceId, quantity: 1 }],
@@ -63,14 +131,12 @@ async function startServer() {
       const session = await stripe.checkout.sessions.create(sessionOptions);
       res.json({ id: session.id, url: session.url });
     } catch (error: any) {
-      console.error("[Stripe Preview] Error:", error);
+      console.error("[Checkout] Error:", error);
       res.status(500).json({ error: error.message });
     }
   };
 
   app.post("/api/create-checkout-session", handleCheckout);
-  app.post("/.netlify/functions/create-checkout", handleCheckout);
-  app.post("/.netlify/functions/create-checkout-session", handleCheckout);
 
   const handleSuggestions = async (req: express.Request, res: express.Response) => {
     try {
@@ -89,75 +155,6 @@ async function startServer() {
   };
 
   app.post("/api/ai/suggestions", handleSuggestions);
-  app.post("/.netlify/functions/ai-suggestions", handleSuggestions);
-  app.post("/.netlify/functions/ai/suggestions", handleSuggestions);
-
-  // Stripe Webhook
-  app.post("/api/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-    let event;
-
-    try {
-      if (webhookSecret && sig && stripe) {
-        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-      } else {
-        event = req.body;
-      }
-    } catch (err: any) {
-      console.error(`Webhook Error: ${err.message}`);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    // Handle the event
-    switch (event.type) {
-      case "checkout.session.completed":
-        const session = event.data.object;
-        const userId = session.client_reference_id;
-        console.log(`Payment successful for user: ${userId}`);
-        
-        if (supabaseAdmin && userId) {
-          try {
-            // Fetch current data to update the payload
-            const { data: row, error: fetchError } = await supabaseAdmin
-              .from("user_app_data")
-              .select("payload")
-              .eq("id", userId)
-              .maybeSingle();
-
-            if (fetchError) throw fetchError;
-
-            let payload = row?.payload || {};
-            if (!payload.user) payload.user = {};
-            payload.user.subscribed = true;
-            payload.user.subscriptionDate = new Date().toISOString();
-
-            const { error: updateError } = await supabaseAdmin
-              .from("user_app_data")
-              .upsert({ 
-                id: userId, 
-                payload, 
-                updated_at: new Date().toISOString() 
-              });
-
-            if (updateError) throw updateError;
-            console.log(`Supabase updated: User ${userId} is now subscribed.`);
-          } catch (dbError) {
-            console.error("Error updating Supabase subscription:", dbError);
-          }
-        }
-        break;
-      case "customer.subscription.deleted":
-        const subscription = event.data.object;
-        console.log(`Subscription deleted: ${subscription.id}`);
-        break;
-      default:
-        console.log(`Unhandled event type ${event.type}`);
-    }
-
-    res.json({ received: true });
-  });
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
@@ -175,7 +172,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server listening on port ${PORT}`);
   });
 }
 
